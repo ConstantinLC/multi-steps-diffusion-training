@@ -296,3 +296,41 @@ class TurbulenceDataset(Dataset):
         s += "\tfilterFrame: %s\n" % (str(self.filterFrame))
         s += "\tsequenceLength: %s\n" % (str(self.sequenceLength))
         return s
+
+
+
+class KolmogorovDataset_Rozet(Dataset):
+    def __init__(self, name: str, folderPath: str, mode: str, resolution: str, sequenceLength:List[Tuple[int, int]]=[],
+                 framesPerTimeStep: int = 1, limit_trajectories: Optional[int] = None, usegrid: bool = False, conditioned: bool = False) -> None:
+        super().__init__()
+        self.name = name
+        self.folderPath = folderPath
+        self.mode = mode
+        self.resolution = resolution
+        self.sequenceLength = sequenceLength
+        self.limit_trajectories = limit_trajectories
+        self.usegrid = usegrid
+        self.conditioned = conditioned
+        
+        self.seqLength = sequenceLength[0]
+        self.time_step = sequenceLength[1]
+
+        self.time_gaps = np.linspace(0, self.time_step, framesPerTimeStep, dtype = int, endpoint=False)
+
+        file_path = os.path.join(folderPath, self.mode + ".h5")
+        self.data = torch.Tensor(np.array(h5py.File(file_path, mode='r')["x"]))
+
+        self.n_trajectories = self.data.shape[0]
+        if self.limit_trajectories is not None:
+            self.n_trajectories = min(self.n_trajectories, self.limit_trajectories)
+        self.n_frames = self.data.shape[1] - self.seqLength + 1  # Ignore timestep for now
+          
+
+    def __len__(self) -> int:
+        return self.n_trajectories * self.n_frames
+
+    def __getitem__(self, idx:int) -> dict:
+        idx_sim = idx // self.n_frames
+        idx_frame = idx % self.n_frames
+        data_idx = self.data[idx_sim][idx_frame:idx_frame+self.seqLength]
+        return {"data" : data_idx, "simParameters": {}} 
