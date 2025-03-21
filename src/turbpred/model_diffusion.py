@@ -88,6 +88,7 @@ class DiffusionModel(nn.Module):
         # TRAINING
         if self.training:
 
+            
             # forward diffusion process that adds noise to data
             if self.p_md.diffCondIntegration == "noisy":
                 d = torch.concat((cond, d), dim=1)
@@ -96,25 +97,40 @@ class DiffusionModel(nn.Module):
                 dNoisy = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * noise
 
             elif self.p_md.diffCondIntegration == "clean":
-                dNoise = torch.randn_like(d, device=device)
+
                 t = torch.randint(0, self.timesteps, (d.shape[0],), device=device).long()
+                dNoise = torch.randn_like(d, device=device)
+                t_nonzero = t[t>0]
+                dNoise_0 = torch.randn_like(d, device=device)[t>0]
+                dNoise_1 = torch.randn_like(d, device=device)[t>0]
+
+                dNoise[t>0] = (torch.sqrt(1 - self.betas[t_nonzero]) * self.sqrtOneMinusAlphasCumprod[t_nonzero-1] * dNoise_0 + torch.sqrt(self.betas[t_nonzero]) * dNoise_1) / self.sqrtOneMinusAlphasCumprod[t_nonzero] 
+                # Separate the noise in two parts to be sure we can recover original image after one step of denoising
                 dNoisy = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * dNoise
 
-                noise = torch.concat((cond, dNoise), dim=1)
+                noise = dNoise #noise = torch.concat((cond, dNoise), dim=1)
                 dNoisy = torch.concat((cond, dNoisy), dim=1)
 
             else:
                 raise ValueError("Unknown conditioning integration mode")
-
-
+            
             # noise prediction with network
-            predictedNoise = self.unet(dNoisy, t)
+            predictedNoise = self.unet(dNoisy, t)[:,-2:]
+
+            # use model (noise predictor) to predict mean
+            modelMean = self.sqrtRecipAlphas[t] * (dNoisy[:,-2:] - self.betas[t] * predictedNoise / self.sqrtOneMinusAlphasCumprod[t])
+
+            predictedX0 = modelMean
+            
+            postNoise = torch.randn_like(modelMean, device=device)[t>0]
+            predictedX0[t>0] = (modelMean[t>0] + self.sqrtPosteriorVariance[t_nonzero] * postNoise - self.sqrtOneMinusAlphasCumprod[t_nonzero-1] * dNoise_0)/self.sqrtAlphasCumprod[t_nonzero - 1]
 
             # unstack batch and sequence dimension again
-            noise = torch.reshape(noise, (-1, seqLen, conditioning.shape[2] + data.shape[2], data.shape[3], data.shape[4]))
-            predictedNoise = torch.reshape(predictedNoise, (-1, seqLen, conditioning.shape[2] + data.shape[2], data.shape[3], data.shape[4]))
+            noise = torch.reshape(noise, (-1, seqLen, data.shape[2], data.shape[3], data.shape[4]))
+            predictedNoise = torch.reshape(predictedNoise, (-1, seqLen, data.shape[2], data.shape[3], data.shape[4]))
+            predictedX0 = torch.reshape(predictedX0, (-1, seqLen, data.shape[2], data.shape[3], data.shape[4]))
 
-            return noise, predictedNoise
+            return noise, predictedNoise, predictedX0
 
 
         # INFERENCE

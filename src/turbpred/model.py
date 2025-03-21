@@ -431,8 +431,8 @@ class PredictionModel(nn.Module):
                 conditioning = torch.concat(cond, dim=2) # combine along channel dimension
                 data = d[:, prevSteps:prevSteps+1]
 
-            noise, predictedNoise = self.modelDecoder(conditioning=conditioning, data=data)
-            return noise, predictedNoise
+            noise, predictedNoise, predictedX0 = self.modelDecoder(conditioning=conditioning, data=data)
+            return noise, predictedNoise, predictedX0
 
 
         # INFERENCE

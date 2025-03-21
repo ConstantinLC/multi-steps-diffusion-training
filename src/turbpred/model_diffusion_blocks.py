@@ -6,6 +6,12 @@ import torch.nn.functional as F
 from einops import rearrange
 from functools import partial
 
+def get_betas(sqrtOneMinusAlphasCumprod):
+        alphasCumprod = 1 - sqrtOneMinusAlphasCumprod**2
+        alphas = alphasCumprod / torch.cat((torch.Tensor([1]), alphasCumprod[:-1]), dim=0)
+        betas = 1 - alphas
+        betas[-1] = 0.999
+        return betas
 
 ### BETA SCHEDULES
 def cosine_beta_schedule(timesteps, s=0.008):
@@ -37,6 +43,18 @@ def quadratic_beta_schedule(timesteps):
     betas = torch.linspace(beta_start**0.5, beta_end**0.5, timesteps) ** 2
     return torch.clip(betas, 0.0001, 0.9999)
 
+def cubic_beta_schedule(timesteps):
+    if timesteps < 20:
+        raise ValueError("Warning: Less than 20 timesteps require adjustments to this schedule!")
+
+    beta_start = 0.0001 * (1000/timesteps) # adjust reference values determined for 1000 steps
+    beta_end = 0.02 * (1000/timesteps)
+    betas = torch.linspace(beta_start**0.5, beta_end**0.5, timesteps) ** 3
+    return 2*torch.clip(betas, 0.0001, 0.9999)
+
+def uniform_noise_beta_schedule(timesteps):
+    return get_betas(torch.linspace(0.2, 1, timesteps))
+
 def sigmoid_beta_schedule(timesteps):
     if timesteps < 20:
         raise Warning("Warning: Less than 20 timesteps require adjustments to this schedule!")
@@ -64,8 +82,8 @@ def Upsample(dim):
     #    nn.Conv2d(dim, dim, 3, 1, 1),
     #)
 
-def Downsample(dim):
-    return nn.Conv2d(dim, dim, 4, 2, 1)
+def Downsample(dim, padding_mode='circular'):
+    return nn.Conv2d(dim, dim, 4, 2, 1, padding_mode=padding_mode)
 
 
 class SinusoidalPositionEmbeddings(nn.Module):
@@ -84,9 +102,9 @@ class SinusoidalPositionEmbeddings(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, dim, dim_out, groups = 8):
+    def __init__(self, dim, dim_out, groups = 8, padding_mode='circular'):
         super().__init__()
-        self.proj = nn.Conv2d(dim, dim_out, 3, padding = 1)
+        self.proj = nn.Conv2d(dim, dim_out, 3, padding = 1, padding_mode=padding_mode)
         self.norm = nn.GroupNorm(groups, dim_out)
         self.act = nn.SiLU()
 
@@ -105,7 +123,7 @@ class Block(nn.Module):
 class ResnetBlock(nn.Module):
     """https://arxiv.org/abs/1512.03385"""
     
-    def __init__(self, dim, dim_out, *, time_emb_dim=None, groups=8):
+    def __init__(self, dim, dim_out, *, time_emb_dim=None, groups=8, padding_mode='circular'):
         super().__init__()
         self.mlp = (
             nn.Sequential(nn.SiLU(), nn.Linear(time_emb_dim, dim_out))
@@ -114,7 +132,7 @@ class ResnetBlock(nn.Module):
 
         self.block1 = Block(dim, dim_out, groups=groups)
         self.block2 = Block(dim_out, dim_out, groups=groups)
-        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
+        self.res_conv = nn.Conv2d(dim, dim_out, 1, padding_mode=padding_mode) if dim != dim_out else nn.Identity()
 
     def forward(self, x, time_emb=None):
         h = self.block1(x)
@@ -130,24 +148,24 @@ class ResnetBlock(nn.Module):
 class ConvNextBlock(nn.Module):
     """https://arxiv.org/abs/2201.03545"""
 
-    def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=2, norm=True):
+    def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=2, norm=True, padding_mode='circular'):
         super().__init__()
         self.mlp = (
             nn.Sequential(nn.GELU(), nn.Linear(time_emb_dim, dim))
             if time_emb_dim is not None else None
         )
 
-        self.ds_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)
+        self.ds_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim, padding_mode=padding_mode)
 
         self.net = nn.Sequential(
             nn.GroupNorm(1, dim) if norm else nn.Identity(),
-            nn.Conv2d(dim, dim_out * mult, 3, padding=1),
+            nn.Conv2d(dim, dim_out * mult, 3, padding=1, padding_mode=padding_mode),
             nn.GELU(),
             nn.GroupNorm(1, dim_out * mult),
-            nn.Conv2d(dim_out * mult, dim_out, 3, padding=1),
+            nn.Conv2d(dim_out * mult, dim_out, 3, padding=1, padding_mode=padding_mode),
         )
 
-        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
+        self.res_conv = nn.Conv2d(dim, dim_out, 1, padding_mode=padding_mode) if dim != dim_out else nn.Identity()
 
     def forward(self, x, time_emb=None):
         h = self.ds_conv(x)
@@ -163,13 +181,13 @@ class ConvNextBlock(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads=4, dim_head=32):
+    def __init__(self, dim, heads=4, dim_head=32, padding_mode='circular'):
         super().__init__()
         self.scale = dim_head**-0.5
         self.heads = heads
         hidden_dim = dim_head * heads
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
-        self.to_out = nn.Conv2d(hidden_dim, dim, 1)
+        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False, padding_mode=padding_mode)
+        self.to_out = nn.Conv2d(hidden_dim, dim, 1, padding_mode=padding_mode)
 
     def forward(self, x):
         b, c, h, w = x.shape
@@ -189,14 +207,14 @@ class Attention(nn.Module):
 
 
 class LinearAttention(nn.Module):
-    def __init__(self, dim, heads=4, dim_head=32):
+    def __init__(self, dim, heads=4, dim_head=32, padding_mode='circular'):
         super().__init__()
         self.scale = dim_head**-0.5
         self.heads = heads
         hidden_dim = dim_head * heads
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
+        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False, padding_mode=padding_mode)
 
-        self.to_out = nn.Sequential(nn.Conv2d(hidden_dim, dim, 1), 
+        self.to_out = nn.Sequential(nn.Conv2d(hidden_dim, dim, 1, padding_mode=padding_mode), 
                                     nn.GroupNorm(1, dim))
 
     def forward(self, x):
@@ -237,17 +255,21 @@ class Unet(nn.Module):
         dim_mults=(1, 2, 4, 8),
         channels=3,
         with_time_emb=True,
+        with_multifreq_emb=False,
         resnet_block_groups=8,
         use_convnext=True,
         convnext_mult=2,
+        padding_mode="circular"
     ):
         super().__init__()
+
+        self.padding_mode = padding_mode
 
         # determine dimensions
         self.channels = channels
 
         init_dim = init_dim if init_dim is not None else dim // 3 * 2
-        self.init_conv = nn.Conv2d(channels, init_dim, 7, padding=3)
+        self.init_conv = nn.Conv2d(channels, init_dim, 7, padding=3, padding_mode=self.padding_mode)
 
         dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
@@ -272,6 +294,16 @@ class Unet(nn.Module):
             self.time_mlp = None
             self.cond_mlp = None
             self.sim_mlp = None
+
+        """if with_multifreq_emb:
+            multifreq_dim = dim * 4
+            self.multifreq_mlp = nn.Sequential(
+                nn.Linear(1, dim),
+                nn.GELU(),
+                nn.Linear(dim, time_dim),
+            )"""
+
+        
 
         # layers
         self.downs = nn.ModuleList([])
@@ -313,13 +345,29 @@ class Unet(nn.Module):
 
         out_dim = out_dim if out_dim is not None else channels
         self.final_conv = nn.Sequential(
-            block_klass(dim, dim), nn.Conv2d(dim, out_dim, 1)
+            block_klass(dim, dim), nn.Conv2d(dim, out_dim, 1, padding_mode=self.padding_mode)
         )
+
+    # returns low and high-passed filter data separately
+    def separateFrequencies(self, data: torch.Tensor, device="cuda", cutoff_frequency=4):
+        npix = data.shape[-1]
+        fft_data = torch.fft.fft2(data)
+        kfreq = torch.fft.fftfreq(npix) * npix
+        kfreq2D = torch.meshgrid(kfreq, kfreq)
+        knrm = torch.sqrt(kfreq2D[0]**2 + kfreq2D[1]**2)
+        fft_highpass = fft_data * (knrm > cutoff_frequency).to(device=device)
+        fft_lowpass = fft_data * (knrm <= cutoff_frequency).to(device=device)
+        data_highpass = torch.real(torch.fft.ifft2(fft_highpass))
+        data_lowpass = torch.real(torch.fft.ifft2(fft_lowpass))
+        #print(data_highpass, data_lowpass)
+        return data_lowpass, data_highpass
+
 
     def forward(self, x, time):
         x = self.init_conv(x)
 
         t = self.time_mlp(time) if self.time_mlp is not None else None
+        #freq = self.multifreq_mlp(freq_band) if self.multifreq_mlp is not None else None
 
         h = []
 
@@ -344,5 +392,6 @@ class Unet(nn.Module):
             x = attn(x)
             x = upsample(x)
 
-        return self.final_conv(x)
+        final_conv = self.final_conv(x)
+        return final_conv #self.separateFrequencies(final_conv)[0]
 

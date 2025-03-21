@@ -44,10 +44,18 @@ class TrainerDiffusion(object):
             data = sample["data"].to(device)
             simParameters = sample["simParameters"].to(device) if type(sample["simParameters"]) is not dict else None
 
-            prediction, _, _ = self.model(data, simParameters)
-            noise, predictedNoise = prediction[0], prediction[1]
+            data_0 = data[:, :2]
 
-            loss = F.smooth_l1_loss(noise, predictedNoise)
+            prediction_0, _, _ = self.model(data_0, simParameters)
+            noise_0, predictedNoise_0, predictedX0 = prediction_0[0], prediction_0[1], prediction_0[2]
+            print(noise_0.shape, predictedNoise_0.shape, predictedX0.shape, data.shape)
+
+            data_1 = data[:, 1:] # torch.cat((predictedX0, data[:,2].unsqueeze(1)), axis=1)
+
+            prediction_1, _, _ = self.model(data_1, simParameters)
+            noise_1, predictedNoise_1, _ = prediction_1[0], prediction_1[1], prediction_1[2]
+            
+            loss = F.smooth_l1_loss(noise_0, predictedNoise_0) + F.smooth_l1_loss(noise_1, predictedNoise_1)
             loss.backward()
 
             self.optimizer.step()
